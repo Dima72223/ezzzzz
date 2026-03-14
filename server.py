@@ -3,47 +3,38 @@ import threading
 
 # Налаштування
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) # Дозволяє перезапускати сервер миттєво
-server.bind(("localhost", 5555))
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(("0.0.0.0", 5555)) # 0.0.0.0 дозволяє підключення по мережі
 server.listen(2)
 
-print("Сервер запущений... Очікування гравців.")
+print("Сервер запущено. Очікування гравців...")
 
-# Початкові дані
-positions = ["500,350", "200,200"]
+# Позиції: "x,y" для кожного гравця
+positions = ["500,600", "500,100"]
 lock = threading.Lock()
 
-def handle(client, player_id):
+def handle_client(conn, player_id):
     global positions
     print(f"Гравець {player_id} підключився.")
-    
     while True:
         try:
-            # Отримуємо координати "x,y"
-            data = client.recv(64).decode()
-            if not data:
-                break
-
+            data = conn.recv(64).decode()
+            if not data: break
+            
             with lock:
-                # Оновлюємо позицію гравця
                 positions[player_id] = data
-                # Відправляємо позицію опонента
                 other_id = 1 - player_id
                 reply = positions[other_id]
             
-            client.send(reply.encode())
+            conn.send(reply.encode())
         except:
             break
-
     print(f"Гравець {player_id} відключився.")
-    client.close()
+    conn.close()
 
 player_count = 0
 while True:
     conn, addr = server.accept()
-    if player_count < 2:
-        thread = threading.Thread(target=handle, args=(conn, player_count))
-        thread.start()
-        player_count += 1
-    else:
-        conn.close() # Відхиляємо третього гравця
+    thread = threading.Thread(target=handle_client, args=(conn, player_count % 2))
+    thread.start()
+    player_count += 1
