@@ -2,116 +2,151 @@ import pygame
 import socket
 import sys
 import math
+import random
 
+# --- Ініціалізація ---
 pygame.init()
-
-# Налаштування екрану
 WIDTH, HEIGHT = 1000, 700
+tile_size = 50
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Top-Down Shooter")
+pygame.display.set_caption("Labyrinth Shooter")
 clock = pygame.time.Clock()
+font = pygame.font.SysFont("Arial", 22, bold=True)
 
 # --- ЗАВАНТАЖЕННЯ ГРАФІКИ ---
-def load_img(path, color):
+def load_img(path, size, color):
     try:
         img = pygame.image.load(path).convert_alpha()
-        return pygame.transform.scale(img, (50, 50))
+        return pygame.transform.scale(img, size)
     except:
-        surf = pygame.Surface((50, 50))
-        surf.fill(color)
-        return surf
+        surf = pygame.Surface(size); surf.fill(color); return surf
 
-player_img = load_img("player.png", (0, 200, 0))
-enemy_img = load_img("enemy.png", (200, 50, 50))
+wall_img = load_img("wall.png", (tile_size, tile_size), (50, 50, 55))
+player_img = load_img("player.png", (35, 35), (0, 255, 0))
+enemy_img = load_img("enemy.png", (35, 35), (255, 0, 0))
+gun_img = load_img("gun.png", (35, 20), (255, 215, 0))
 
-# --- СТІНИ ---
-walls = [
-    pygame.Rect(200, 200, 600, 30),
-    pygame.Rect(150, 450, 200, 30),
-    pygame.Rect(650, 450, 200, 30),
-    pygame.Rect(485, 300, 30, 250)
-]
+# --- ЛАБІРИНТ ---
+def generate_level():
+    walls = []
+    empty_cells = []
+    rows, cols = HEIGHT // tile_size, WIDTH // tile_size
+    for r in range(rows):
+        for c in range(cols):
+            if r == 0 or r == rows-1 or c == 0 or c == cols-1 or (random.random() < 0.2 and (r,c) != (1,1)):
+                walls.append(pygame.Rect(c * tile_size, r * tile_size, tile_size, tile_size))
+            else:
+                empty_cells.append((c * tile_size, r * tile_size))
+    random.shuffle(empty_cells)
+    guns = [pygame.Rect(empty_cells[0][0]+10, empty_cells[0][1]+15, 30, 20),
+            pygame.Rect(empty_cells[1][0]+10, empty_cells[1][1]+15, 30, 20)]
+    return walls, guns
 
-# Об'єкти
-player = pygame.Rect(500, 600, 45, 45)
-enemy = pygame.Rect(0, 0, 45, 45)
-speed = 5
-bullets = [] # Список: [x, y, dx, dy]
+walls, guns = generate_level()
 
-# Мережа
+# --- СТАТИСТИКА ---
+player_rect = pygame.Rect(60, 60, 35, 35)
+enemy_rect = pygame.Rect(-100, -100, 35, 35)
+hp = 100
+enemy_hp = 100
+damage_to_send = 0
+has_gun = False
+bullets = []
+game_over = False
+
+# --- МЕРЕЖА ---
 client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 try:
     client.connect(("localhost", 5555))
     client.setblocking(False)
 except:
-    print("Не вдалося підключитися до сервера!")
-    sys.exit()
+    print("Запустіть спочатку сервер!")
 
-def move_with_walls(rect, dx, dy, walls):
-    # Рух по X
-    rect.x += dx
-    for wall in walls:
-        if rect.colliderect(wall):
-            if dx > 0: rect.right = wall.left
-            if dx < 0: rect.left = wall.right
-    # Рух по Y
-    rect.y += dy
-    for wall in walls:
-        if rect.colliderect(wall):
-            if dy > 0: rect.bottom = wall.top
-            if dy < 0: rect.top = wall.bottom
-
+# --- ЛОГІКА ---
 while True:
-    screen.fill((40, 40, 40))
+    screen.fill((30, 30, 35))
     
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
-            pygame.quit()
-            sys.exit()
+            pygame.quit(); sys.exit()
         
-        if event.type == pygame.MOUSEBUTTONDOWN:
+        if event.type == pygame.MOUSEBUTTONDOWN and has_gun and not game_over:
             mx, my = pygame.mouse.get_pos()
-            # Обчислення вектора напрямку
-            dist_x = mx - player.centerx
-            dist_y = my - player.centery
-            angle = math.atan2(dist_y, dist_x)
-            bullets.append([player.centerx, player.centery, math.cos(angle), math.sin(angle)])
+            angle = math.atan2(my - player_rect.centery, mx - player_rect.centerx)
+            bullets.append([player_rect.centerx, player_rect.centery, math.cos(angle), math.sin(angle)])
 
-    # 1. Рух гравця
-    keys = pygame.key.get_pressed()
-    dx = (keys[pygame.K_d] - keys[pygame.K_a]) * speed
-    dy = (keys[pygame.K_s] - keys[pygame.K_w]) * speed
-    move_with_walls(player, dx, dy, walls)
+    if not game_over:
+        keys = pygame.key.get_pressed()
+        speed = 4
+        dx = (keys[pygame.K_d] - keys[pygame.K_a]) * speed
+        dy = (keys[pygame.K_s] - keys[pygame.K_w]) * speed
+        
+        # Рух з колізіями
+        player_rect.x += dx
+        for w in walls: 
+            if player_rect.colliderect(w):
+                if dx > 0: player_rect.right = w.left
+                if dx < 0: player_rect.left = w.right
+        player_rect.y += dy
+        for w in walls:
+            if player_rect.colliderect(w):
+                if dy > 0: player_rect.bottom = w.top
+                if dy < 0: player_rect.top = w.bottom
 
-    # 2. Мережа (синхронізація позицій)
+        # Підбір зброї
+        for g in guns[:]:
+            if player_rect.colliderect(g):
+                has_gun = True
+                guns.remove(g)
+
+    # --- Мережевий обмін ---
     try:
-        client.send(f"{player.x},{player.y}".encode())
-        data = client.recv(64).decode()
+        # Відправляємо: "x,y,hp,damage_i_did"
+        client.send(f"{player_rect.x},{player_rect.y},{hp},{damage_to_send}".encode())
+        damage_to_send = 0 # Скидаємо після відправки
+        
+        data = client.recv(128).decode()
         if data:
-            ex, ey = map(int, data.split(","))
-            enemy.x, enemy.y = ex, ey
+            ex, ey, ehp, dmg_taken = map(int, data.split(","))
+            enemy_rect.x, enemy_rect.y, enemy_hp = ex, ey, ehp
+            if dmg_taken > 0:
+                hp -= dmg_taken # Отримуємо шкоду від ворога
     except: pass
 
-    # 3. Малювання стін
-    for wall in walls:
-        pygame.draw.rect(screen, (80, 80, 80), wall)
-
-    # 4. Малювання гравців (Картинки)
-    screen.blit(player_img, (player.x, player.y))
-    screen.blit(enemy_img, (enemy.x, enemy.y))
-
-    # 5. Кулі
+    # --- Кулі та влучання ---
     for b in bullets[:]:
-        b[0] += b[2] * 10 # рух x
-        b[1] += b[3] * 10 # рух y
+        b[0] += b[2] * 12
+        b[1] += b[3] * 12
         b_rect = pygame.Rect(b[0]-3, b[1]-3, 6, 6)
         
-        pygame.draw.circle(screen, (255, 255, 0), (int(b[0]), int(b[1])), 4)
-
-        # Видалення куль (об стіни або межі)
-        hit_wall = any(b_rect.colliderect(w) for w in walls)
-        if hit_wall or not screen.get_rect().collidepoint(b[0], b[1]):
+        if b_rect.colliderect(enemy_rect):
+            damage_to_send = 10 # Наступний пакет даних повідомить ворогу про шкоду
             bullets.remove(b)
+            continue
+            
+        if any(b_rect.colliderect(w) for w in walls) or not screen.get_rect().collidepoint(b[0], b[1]):
+            if b in bullets: bullets.remove(b)
+
+    # --- МАЛЮВАННЯ ---
+    for wall in walls: screen.blit(wall_img, (wall.x, wall.y))
+    for g in guns: screen.blit(gun_img, (g.x, g.y))
+    
+    if hp > 0: screen.blit(player_img, player_rect)
+    if enemy_hp > 0: screen.blit(enemy_img, enemy_rect)
+    for b in bullets: pygame.draw.circle(screen, (255, 255, 0), (int(b[0]), int(b[1])), 4)
+
+    # UI
+    s1 = font.render(f"HP: {hp}", True, (0, 255, 0))
+    s2 = font.render(f"ENEMY: {enemy_hp}", True, (255, 50, 50))
+    screen.blit(s1, (20, 20))
+    screen.blit(s2, (WIDTH-150, 20))
+
+    if hp <= 0:
+        game_over = True
+        txt = font.render("GAME OVER! PRESS R TO RESTART", True, (255, 255, 255))
+        screen.blit(txt, (WIDTH//2-150, HEIGHT//2))
+        if pygame.key.get_pressed()[pygame.K_r]:
+            hp = 100; game_over = False; player_rect.topleft = (60, 60)
 
     pygame.display.flip()
     clock.tick(60)
